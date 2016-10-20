@@ -9,4 +9,4 @@ if [[ "${input_directory}" == "" ]] ; then
 	exit 1;
 fi	
 
-ffmpeg -framerate 10 -i "${input_directory}/frame%03d.tif" -c:v libx264 -pix_fmt yuv420p -crf 22 -profile:v high -f mp4 movie.mp4 
+ffmpeg -framerate 10 -i "${input_directory}/frame%03d.tif" -c:v libx264 -pix_fmt yuv420p -crf 22 -profile:v high -f mp4 movie.mp4
