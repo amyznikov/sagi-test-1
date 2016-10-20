@@ -355,7 +355,8 @@ int main(int argc, char *argv[])
     if ( current.data ) {
 
       diff = current * (first_pwr / current_pwr) - prev;
-      prev = current;//.clone();
+      //diff = current - prev;
+      prev = current;
 
       diff -= mean(diff);
 
