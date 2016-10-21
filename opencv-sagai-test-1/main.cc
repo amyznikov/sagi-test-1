@@ -195,6 +195,54 @@ static void normalize_pixels(Mat & image, double smin, double smax, double dmin,
 }
 
 
+
+static void detect_blobs(Mat & image, std::vector<KeyPoint> & blobs)
+{
+  // Setup SimpleBlobDetector parameters.
+  SimpleBlobDetector::Params params;
+
+  // Change thresholds
+  params.thresholdStep = 2;
+  params.minThreshold = 0;
+  params.maxThreshold = 256;
+  params.minRepeatability = 5;
+  params.minDistBetweenBlobs = 1;
+
+  params.filterByArea = true;
+  params.minArea = 15;
+  params.maxArea = 200;
+
+  params.filterByColor = false;
+  params.filterByCircularity = true;
+  params.minCircularity = 0.5;
+  params.maxCircularity = 1;
+
+  params.filterByConvexity = false;
+  //params.minConvexity = 0.0;
+  //params.maxConvexity = 1;
+
+  // Detect blobs.
+#if CV_MAJOR_VERSION < 3   // If you are using OpenCV 2
+  SimpleBlobDetector detector(params);
+  detector.detect( im, keypoints);
+#else
+  cv::Ptr<SimpleBlobDetector> detector = SimpleBlobDetector::create(params);
+  detector->detect( image, blobs );
+#endif
+
+//  // Draw detected blobs as red circles.
+//  // DrawMatchesFlags::DRAW_RICH_KEYPOINTS flag ensures the size of the circle corresponds to the size of blob
+//  Mat im_with_keypoints;
+//  drawKeypoints( image, blobs, im_with_keypoints, Scalar(0,0,255), DrawMatchesFlags::DRAW_RICH_KEYPOINTS );
+}
+
+
+
+
+
+
+
+
 static int flat_field_blur_size = 100;
 static int local_field_blur_size = 3;
 
@@ -294,8 +342,7 @@ int main(int argc, char *argv[])
   vector<string> input_files;
 
   Mat prev, current, diff;
-  double first_pwr = 0, current_pwr = 0;
-  double first_mean = 0, current_mean = 0;
+  double current_mean = 0, current_pwr = 0;
 
   size_t i, j;
 
@@ -504,6 +551,22 @@ int main(int argc, char *argv[])
       pow(diff, gamma, diff);
       normalize_pixels(diff, 0, 1, 0, 255);
     }
+
+
+    if ( true ) {
+      std::vector<KeyPoint> blobs;
+      detect_blobs(diff, blobs);
+
+      if ( blobs.size() < 1 ) {
+        fprintf(stderr, "No nlobs detected\n");
+      }
+      else {
+          // Draw detected blobs as red circles.
+          // DrawMatchesFlags::DRAW_RICH_KEYPOINTS flag ensures the size of the circle corresponds to the size of blob
+          drawKeypoints( diff, blobs, diff, Scalar(0,0,255), DrawMatchesFlags::DRAW_RICH_KEYPOINTS );
+      }
+    }
+
 
     diff.convertTo(diff, CV_8UC1);
 

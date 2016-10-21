@@ -47,8 +47,8 @@ LDFLAGS = $(CXXFLAGS)
 # STRIP = $(cross)strip --strip-all
 STRIP = @echo "don't strip "
 
-LDLIBS += -lopencv_highgui -lopencv_video -lopencv_videoio -lopencv_imgproc -lopencv_imgcodecs -lopencv_core -lstdc++
-#  -lopencv_tracking 
+LDLIBS += -lopencv_highgui -lopencv_features2d -lopencv_imgproc -lopencv_imgcodecs -lopencv_core -lstdc++
+#  -lopencv_tracking  -lopencv_video -lopencv_videoio
 
 #########################################
 
