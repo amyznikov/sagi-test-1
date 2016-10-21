@@ -587,6 +587,8 @@ int main(int argc, char *argv[])
       }
     }
 
+    diff = diff(Rect(32, 52, 960, 720));
+
     sprintf(outfilename, "%s/frame%03zu.tif", output_directory_name, j);
     if ( !imwrite(outfilename, diff) ) {
       fprintf(stderr, "fatal: imwrite(%s) fails\n", outfilename);
