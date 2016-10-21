@@ -75,14 +75,12 @@ Brief outline of movie generation algorithm:
 	 
 	
 	
-		           
+There are a many application parameters affects to the produced result.
+The example movie in opencv-sagai-test-1 directory was created using following parameters:
 
 
-
-
-
-
-
+	$ ./opencv-sagai-test-1 ../input-images cr=400  a=sub -g gmin=-0.5 gmax=0.5 b=0 f=1 gamma=1 alpha=0.05 
+	$ ../create_movie.sh output-images/    
 
 
 
