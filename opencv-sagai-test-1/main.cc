@@ -202,17 +202,19 @@ static void detect_blobs(Mat & image, std::vector<KeyPoint> & blobs)
   SimpleBlobDetector::Params params;
 
   // Change thresholds
-  params.thresholdStep = 2;
-  params.minThreshold = 0;
-  params.maxThreshold = 256;
-  params.minRepeatability = 5;
-  params.minDistBetweenBlobs = 1;
+  params.minThreshold = 10;
+  params.maxThreshold = 50;
+  params.thresholdStep = 10;
+  params.minRepeatability = 3;
+  params.minDistBetweenBlobs = 10;
 
   params.filterByArea = true;
-  params.minArea = 15;
-  params.maxArea = 200;
+  params.minArea = 4;
+  params.maxArea = 250;
 
-  params.filterByColor = false;
+  params.filterByColor = true;
+  params.blobColor = 255;
+
   params.filterByCircularity = true;
   params.minCircularity = 0.5;
   params.maxCircularity = 1;
@@ -221,13 +223,15 @@ static void detect_blobs(Mat & image, std::vector<KeyPoint> & blobs)
   //params.minConvexity = 0.0;
   //params.maxConvexity = 1;
 
+  params.filterByInertia = false;
+
   // Detect blobs.
 #if CV_MAJOR_VERSION < 3   // If you are using OpenCV 2
   SimpleBlobDetector detector(params);
   detector.detect( im, keypoints);
 #else
   cv::Ptr<SimpleBlobDetector> detector = SimpleBlobDetector::create(params);
-  detector->detect( image, blobs );
+  detector->detect(image, blobs );
 #endif
 
 //  // Draw detected blobs as red circles.
@@ -503,6 +507,8 @@ int main(int argc, char *argv[])
   for ( j = 0, i = 0; i < input_files.size(); ++i ) {
 
     double mv = 0, pw = 0;
+    bool process_blobs = true;
+    std::vector<KeyPoint> blobs;
 
     if ( !load_image(current, input_files[i]) ) {
       continue;
@@ -543,6 +549,7 @@ int main(int argc, char *argv[])
       dump_hist(outfilename, diff, gmin, gmax);
     }
 
+
     if ( gamma == 1 ) {
       normalize_pixels(diff, gmin, gmax, 0, 255);
     }
@@ -552,23 +559,33 @@ int main(int argc, char *argv[])
       normalize_pixels(diff, 0, 1, 0, 255);
     }
 
+    if ( process_blobs ) {
 
-    if ( true ) {
-      std::vector<KeyPoint> blobs;
-      detect_blobs(diff, blobs);
+      Mat tmp = diff.clone();
+      normalize_pixels(tmp, 0, 255, 0, 1);
+
+      tmp -= mean(tmp);
+      pow(tmp, 2, tmp);
+      blur(tmp, tmp, Size(5, 5));
+      normalize_pixels(tmp, 0, 1, 0, 255);
+      tmp.convertTo(tmp, CV_8UC1);
+
+      detect_blobs(tmp, blobs);
 
       if ( blobs.size() < 1 ) {
-        fprintf(stderr, "No nlobs detected\n");
-      }
-      else {
-          // Draw detected blobs as red circles.
-          // DrawMatchesFlags::DRAW_RICH_KEYPOINTS flag ensures the size of the circle corresponds to the size of blob
-          drawKeypoints( diff, blobs, diff, Scalar(0,0,255), DrawMatchesFlags::DRAW_RICH_KEYPOINTS );
+        fprintf(stderr, "No blobs detected\n");
       }
     }
 
 
     diff.convertTo(diff, CV_8UC1);
+
+    if ( process_blobs && blobs.size() ) {
+      //drawKeypoints(diff, blobs, diff, Scalar(0,0,255), DrawMatchesFlags::DRAW_RICH_KEYPOINTS );
+      for ( size_t i = 0; i < blobs.size(); ++i ) {
+        circle(diff, blobs[i].pt, 15, Scalar(0, 0, 255), 2, LINE_4, 0);
+      }
+    }
 
     sprintf(outfilename, "%s/frame%03zu.tif", output_directory_name, j);
     if ( !imwrite(outfilename, diff) ) {
