@@ -1,7 +1,7 @@
 #! /bin/bash
 
 
-for (( i = 2; i <= 22; ++i)); do 
+for (( i = 2; i <= 14; ++i)); do 
 
 	idx=$(printf "%03d" $i); 
 	rm -f outputs-${idx}/* ;

@@ -295,7 +295,7 @@ static bool load_image(Mat & image, const string & fname, int gbs, int lbs)
     return false;
   }
 
-  //image = image(Rect(32, 52, 960, 720));
+  image = image(Rect(32, 52, 960, 720));
   image.convertTo(image, CV_32FC1);
 
   if ( gbs > 0 ) {
@@ -917,7 +917,7 @@ int main(int argc, char *argv[])
       normalize_pixels(diff, 0, 1, 0, 255);
     }
 
-    if ( false ) {
+    if ( true ) {
       for ( std::vector<KeyPoint>::const_iterator ii =  gblobs.begin(); ii != gblobs.end(); ++ii ) {
 
         Rect rc(
@@ -937,7 +937,7 @@ int main(int argc, char *argv[])
 
     diff.convertTo(diff, CV_8UC1);
 
-    if ( true ) {
+    if ( false ) {
       draw_blobs(diff, gblobs, NULL, -10 );
     }
 
