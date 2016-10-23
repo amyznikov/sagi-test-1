@@ -126,37 +126,57 @@ static void calc_hist(const Mat & image, double bins[], size_t numbins, double m
 
 static int central_region_radius = 150;
 
-static void get_energy_metrics(const Mat & image, double * mean, double * pwr)
+static void calc_circle_stats(const Mat & image, int x0, int y0, int r, double * m, double * v)
+{
+  size_t n = 0;
+  int xmin = x0 <= r ? 0 : x0 - r;
+  int ymin = y0 <= r ? 0 : y0 - r;
+  int xmax = x0 + r >= image.cols ? image.cols - 1 : x0 + r;
+  int ymax = y0 + r >= image.rows ? image.rows - 1 : y0 + r;
+
+  *m = 0, *v = 0;
+
+  for ( int y = ymin; y <= ymax; ++y ) {
+    const float * row = reinterpret_cast<const float*>(image.ptr(y));
+    for ( int x = xmin; x <= xmax; ++x ) {
+      if ( hypot(x - x0, y - y0) <= r ) {
+        *m += row[x];
+        *v += row[x] * row[x];
+        ++n;
+      }
+    }
+  }
+
+  if ( n > 0 ) {
+    *m /= n;
+    *v = sqrt((*v / n) - (*m * *m));
+  }
+}
+
+
+static void get_energy_metrics(const Mat & image, double * m, double * p)
 {
   const double rr = min(min(central_region_radius, image.rows), image.cols);
   const double x0 = image.cols / 2, y0 = image.rows / 2;
+  size_t n = 0;
 
-  *pwr = 0, *mean = 0;
-
-  size_t npix = 0;
-
-  for ( int y = 0; y < image.rows; y++ ) {
-    const float * row = reinterpret_cast<const float*>(image.ptr(y));
-    for ( int x = 0; x < image.cols; x++ ) {
-      if ( hypot(x - x0, y - y0) < rr ) {
-        *mean += row[x];
-        ++npix;
-      }
-    }
-  }
-  *mean /= npix;
-
+  *p = 0, *m = 0;
 
   for ( int y = 0; y < image.rows; y++ ) {
     const float * row = reinterpret_cast<const float*>(image.ptr(y));
     for ( int x = 0; x < image.cols; x++ ) {
       if ( hypot(x - x0, y - y0) < rr ) {
-        *pwr += (row[x] - *mean) * (row[x] - *mean);
+        *m += row[x];
+        *p += row[x] * row[x];
+        ++n;
       }
     }
   }
 
-  *pwr = sqrt(*pwr / npix) ;
+  if ( n ) {
+    *m /= n;
+    *p = sqrt((*p / n) - (*m * *m));
+  }
 }
 
 
@@ -181,14 +201,11 @@ static void normalize_pixels(Mat & image, double smin, double smax, double dmin,
   for ( int y = 0; y < image.rows; y++ ) {
     float * row = reinterpret_cast<float*>(image.ptr(y));
     for ( int x = 0; x < image.cols; x++ ) {
-      if ( row[x] < smin ) {
+      if ( (row[x] = (row[x] - smin) * (dmax - dmin) / (smax - smin) + dmin) < dmin ) {
         row[x] = dmin;
       }
-      else if ( row[x] >= smax ) {
+      else if ( row[x] >= dmax ) {
         row[x] = dmax;
-      }
-      else {
-        row[x] = (row[x] - smin) * (dmax - dmin) / (smax - smin);
       }
     }
   }
@@ -201,22 +218,22 @@ static void detect_blobs(Mat & image, std::vector<KeyPoint> & blobs)
   // Setup SimpleBlobDetector parameters.
   SimpleBlobDetector::Params params;
 
-  // Change thresholds
-  params.minThreshold = 10;
-  params.maxThreshold = 50;
-  params.thresholdStep = 10;
-  params.minRepeatability = 3;
-  params.minDistBetweenBlobs = 10;
+  // Set thresholds
+  params.minThreshold = 0;
+  params.maxThreshold = 255;
+  params.thresholdStep = (params.maxThreshold - params.minThreshold);
+  params.minRepeatability = 1;
+  params.minDistBetweenBlobs = 3;
 
   params.filterByArea = true;
-  params.minArea = 4;
-  params.maxArea = 250;
+  params.minArea = 1;
+  params.maxArea = 400;
 
-  params.filterByColor = true;
+  params.filterByColor = false;
   params.blobColor = 255;
 
   params.filterByCircularity = true;
-  params.minCircularity = 0.5;
+  params.minCircularity = 0.7;
   params.maxCircularity = 1;
 
   params.filterByConvexity = false;
@@ -240,6 +257,28 @@ static void detect_blobs(Mat & image, std::vector<KeyPoint> & blobs)
 //  drawKeypoints( image, blobs, im_with_keypoints, Scalar(0,0,255), DrawMatchesFlags::DRAW_RICH_KEYPOINTS );
 }
 
+static void save_blobs(const char * fname, const vector<KeyPoint> & blobs )
+{
+  FILE * fp;
+  int i = 0;
+
+  if ( !(fp = fopen(fname, "w")) ) {
+    fprintf(stderr, "Can not write %s: %s\n", fname, strerror(errno));
+    goto end;
+  }
+
+  fprintf(fp, "IDX\tX\tY\tS\tA\tOCT\tCLS\n");
+  for ( vector<KeyPoint>::const_iterator ii = blobs.begin(); ii != blobs.end(); ++ii, ++i ) {
+    fprintf(fp, "%3d\t%8g\t%8g\t%8g\t%8g\t%3d\t%5d\n", i, ii->pt.x, ii->pt.y, ii->size, ii->angle, ii->octave, ii->class_id);
+  }
+
+
+end:
+
+  if ( fp ) {
+    fclose(fp);
+  }
+}
 
 
 
@@ -247,10 +286,7 @@ static void detect_blobs(Mat & image, std::vector<KeyPoint> & blobs)
 
 
 
-static int flat_field_blur_size = 100;
-static int local_field_blur_size = 3;
-
-static bool load_image(Mat & image, const string & fname)
+static bool load_image(Mat & image, const string & fname, int gbs, int lbs)
 {
   Mat fld;
 
@@ -259,15 +295,16 @@ static bool load_image(Mat & image, const string & fname)
     return false;
   }
 
+  //image = image(Rect(32, 52, 960, 720));
   image.convertTo(image, CV_32FC1);
 
-  if ( local_field_blur_size > 0 ) {
-    blur(image, image, Size(local_field_blur_size, local_field_blur_size));
+  if ( gbs > 0 ) {
+    blur(image, fld, Size(gbs, gbs));
+    image /= fld;
   }
 
-  if ( flat_field_blur_size > 0 ) {
-    blur(image, fld, Size(flat_field_blur_size, flat_field_blur_size));
-    image /= fld;
+  if ( lbs > 0 ) {
+    blur(image, image, Size(lbs, lbs));
   }
 
   return true;
@@ -337,6 +374,313 @@ void dump_hist(const char * fname, const Mat & image, double gmin, double gmax)
 
 }
 
+
+static void draw_blobs(Mat & img, const std::vector<KeyPoint> & blobs, const char * output_directory_name, int frame_index, bool draw=true)
+{
+  if ( draw ) {
+    Scalar color1 = Scalar(0, 0, 0);
+    Scalar color2 = Scalar(255, 255, 255);
+    for ( size_t i = 0; i < blobs.size(); ++i ) {
+      circle(img, blobs[i].pt, blobs[i].size, color1, 1, LINE_4, 0);
+      circle(img, blobs[i].pt, blobs[i].size, color2, 1, LINE_4, 0);
+    }
+  }
+
+  if ( output_directory_name ) {
+    char outfilename[PATH_MAX];
+    sprintf(outfilename, "%s/blobs.%03d.tif", output_directory_name, frame_index);
+    if ( !imwrite(outfilename, img) ) {
+      fprintf(stderr, "fatal: imwrite(%s) fails\n", outfilename);
+    }
+  }
+}
+
+
+static void variance_filter(Mat & src, Mat & dst)
+{
+  double r1 = 6;
+  double r2 = 25;
+  //double m1, v1, m2, v2;
+  double minVal, maxVal;
+  Mat sigma1, sigma2, I1, M1, I2, M2;
+
+  static Mat ring1, ring2;
+
+  if ( !ring1.data ) {
+    int npix = 0;
+    ring1 = Mat::zeros(r1 * 2 + 1, r1 * 2 + 1, CV_32FC1);
+    for ( int y = 0; y < r1 * 2 + 1; ++y ) {
+      float * row = reinterpret_cast<float*>(ring1.ptr(y));
+      for ( int x = 0; x < r1 * 2 + 1; ++x ) {
+        row[x] = hypot(x - r1, y - r1) <= r1;
+        ++npix;
+      }
+    }
+    ring1 /= npix;
+  }
+
+  if ( !ring2.data ) {
+    int npix = 0;
+    ring2 = Mat::zeros(r2 * 2 + 1, r2 * 2 + 1, CV_32FC1);
+    for ( int y = 0; y < r2 * 2 + 1; ++y ) {
+      float * row = reinterpret_cast<float*>(ring2.ptr(y));
+      for ( int x = 0; x < r2 * 2 + 1; ++x ) {
+        row[x] = hypot(x - r2, y - r2) <= r2;
+        ++npix;
+      }
+    }
+    ring2 /= npix;
+  }
+
+  //blur(src, src, Size(3, 3));
+  //GaussianBlur(src, src, Size(0, 0), 2, 2);
+
+
+  //GaussianBlur(src, M1, Size(0, 0), r1, r1);
+  filter2D(src, M1, -1, ring1);
+  //GaussianBlur(src.mul(src), I1, Size(0, 0), r1, r1);
+  filter2D(src.mul(src), I1, -1, ring1);
+  cv::sqrt(I1 - M1.mul(M1), sigma1);
+  minMaxLoc(sigma1, &minVal, &maxVal);
+  printf("SIGMA1: minVal=%g maxVal=%g\n", minVal, maxVal);
+
+  //GaussianBlur(src, M2, Size(0, 0), r2, r2);
+  filter2D(src, M2, -1, ring2);
+  //GaussianBlur(src.mul(src), I2, Size(0, 0), r2, r2);
+  filter2D(src.mul(src), I2, -1, ring2);
+  cv::sqrt(I2 - M2.mul(M2), sigma2);
+  //sigma2 = I2 - M2.mul(M2);
+  minMaxLoc(sigma2, &minVal, &maxVal);
+  printf("SIGMA2: minVal=%g maxVal=%g\n", minVal, maxVal);
+
+  divide(sigma1, sigma2, dst);
+
+  minMaxLoc(dst, &minVal, &maxVal);
+  printf("VAR: minVal=%g maxVal=%g\n", minVal, maxVal);
+
+  normalize_pixels(dst, 1.5, 3, 0, 255);
+}
+
+
+
+struct blob {
+  double x, y, sx, sy, xmin, xmax, ymin, ymax, size;
+  int n;
+  blob(double x_, double y_, double sx_, double sy_, double size_, int n_)
+      : x(x_), y(y_), sx(sx_), sy(sy_), xmin(x_), xmax(x_), ymin(y_), ymax(y_), size(size_), n(n_)
+  {
+  }
+  blob(double x_, double y_, double size_)
+      : x(x_), y(y_), sx(0), sy(0), xmin(x_), xmax(x_), ymin(y_), ymax(y_), size(size_), n(1)
+  {
+  }
+};
+
+typedef vector<blob>
+  bloblist;
+
+
+static bloblist::iterator find_blob(bloblist::iterator beg, bloblist::iterator end, double x, double y, double r)
+{
+  for ( ; beg != end; ++beg ) {
+    if ( hypot(beg->x - x, beg->y - y) < r ) {
+      break;
+    }
+  }
+  return beg;
+}
+
+
+static void match_blobs(bloblist & blobs)
+{
+  int njoins = 0;
+
+  do {
+    njoins = 0;
+    for ( bloblist::iterator b = blobs.begin(); b != blobs.end(); ++b ) {
+
+      double x = b->x, y = b->y;
+      double x2 = x * x, y2 = y * y;
+      double xmin = b->xmin, xmax = b->xmax;
+      double ymin = b->ymin, ymax = b->ymax;
+      double size = b->size;
+      double r = 10;
+      int n = 1;
+
+      bloblist::iterator match = b + 1;
+      while ( (match = find_blob(match, blobs.end(), x, y, r)) != blobs.end() ) {
+        x += match->x;
+        y += match->y;
+        x2 += match->x * match->x;
+        y2 += match->y * match->y;
+
+        if ( match->x < xmin ) {
+          xmin = match->x;
+        }
+        else if ( match->x > xmax ) {
+          xmax = match->x;
+        }
+
+        if ( match->y < ymin ) {
+          ymin = match->y;
+        }
+        else if ( match->y > ymax ) {
+          ymax = match->y;
+        }
+
+        if ( match->size > size ) {
+          size = match->size;
+        }
+
+        ++n;
+        match = blobs.erase(match);
+      }
+
+      if ( n > 1 ) {
+
+        b->x = x / n;
+        b->y = y / n;
+        b->sx = sqrt(x2 / n - b->x * b->x);
+        b->sy = sqrt(y2 / n - b->y * b->y);
+        b->n += n - 1;
+        b->xmin = xmin;
+        b->xmax = xmax;
+        b->ymin = ymin;
+        b->ymax = ymax;
+        b->size = size;
+
+        ++njoins;
+        //fprintf(stderr, "n=%d\n", n);
+      }
+    }
+
+    fprintf(stderr, "njoins=%d\n", njoins);
+    //usleep(100*1000);
+
+  } while (njoins > 0 );
+
+
+}
+
+
+static bool detect_dust(const vector<string> & input_files, vector<KeyPoint> & gblobs, const char * output_directory_name)
+{
+  Mat prev, current, diff, var;
+  double mv, pw;
+  size_t i, n;
+
+  bloblist common;
+
+  for ( n = 0, i = 0; i < input_files.size(); ++i ) {
+
+    vector<KeyPoint> blobs;
+    bloblist tmp;
+
+
+    if ( !load_image(current, input_files[i], 0, 0) ) {
+      continue;
+    }
+
+    get_energy_metrics(current, &mv, &pw);
+    current -= mv;
+    current /= pw;
+
+    if ( !prev.data ) {
+      prev = current;
+      continue;
+    }
+
+    diff = current - prev;
+    prev = current;
+
+    variance_filter(diff, var);
+    var.convertTo(var, CV_8UC1);
+    detect_blobs(var, blobs);
+    draw_blobs(var, blobs, output_directory_name, n, false);
+
+    for ( vector<KeyPoint>::const_iterator ii = blobs.begin(); ii != blobs.end(); ++ii ) {
+      tmp.emplace_back(blob(ii->pt.x, ii->pt.y, ii->size));
+    }
+
+    match_blobs(tmp);
+    for ( bloblist::iterator b = tmp.begin(); b != tmp.end(); ++b ) {
+      b->n = 1;
+    }
+    common.insert(common.end(), tmp.begin(), tmp.end());
+
+
+
+    ++n;
+  }
+
+  if ( n ) {
+    match_blobs(common);
+
+    for ( bloblist::iterator b = common.begin(); b != common.end(); ++b ) {
+      b->sx = b->xmax - b->xmin;
+      b->sy = b->ymax - b->ymin;
+      if ( b->n > 2 && hypot(b->sx, b->sy) <= 6 ) {
+        gblobs.emplace_back(b->x, b->y, b->size, -1, 0, b->n); // hypot(b->sx, b->sy)
+      }
+    }
+
+    if ( 1 ) {
+
+      char fname[PATH_MAX];
+
+      sprintf(fname, "%s/blobs.txt", output_directory_name);
+
+      FILE * fp = fopen(fname, "w");
+
+      fprintf(fp, "X\tY\tSX\tSY\tS\tN\n");
+      for ( bloblist::const_iterator b = common.begin(); b != common.end(); ++b ) {
+        if ( b->n != 1 ) {
+          fprintf(fp, "%8g\t%8g\t%8g\t%8g\t%8g\t%4d\n", b->x, b->y, b->sx, b->sy, hypot(b->sx, b->sy), b->n);
+        }
+      }
+      fclose(fp);
+    }
+
+
+
+//
+//    if ( 1 ) {
+//
+//      char fname[PATH_MAX];
+//
+//      sprintf(fname, "%s/blobs.txt", output_directory_name);
+//
+//      FILE * fp = fopen(fname, "w");
+//
+//      fprintf(fp, "X\tY\tS\tOCT\n");
+//      for ( vector<KeyPoint>::iterator b = gblobs.begin(); b != gblobs.end(); ++b ) {
+//        fprintf(fp, "%8g\t%8g\t%8g\t%4d\n", b->pt.x, b->pt.y, b->size, b->octave);
+//      }
+//      fclose(fp);
+//    }
+
+  }
+
+
+  return n > 0;
+}
+
+
+static void save_normalized_image(const Mat & image, const char * output_directory_name, const char * prefix, int frame_index )
+{
+  Mat gray;
+  char outfilename[PATH_MAX];
+
+  //normalize_pixels(diff, gmin, gmax, 0, 255);
+  image.convertTo(gray, CV_8UC1);
+
+  sprintf(outfilename, "%s/%s.%03d.tif", output_directory_name, prefix, frame_index);
+  if ( !imwrite(outfilename, gray) ) {
+    fprintf(stderr, "fatal: imwrite(%s) fails\n", outfilename);
+  }
+}
+
+
 int main(int argc, char *argv[])
 {
   const char * input_directory_name = NULL;
@@ -345,12 +689,15 @@ int main(int argc, char *argv[])
 
   vector<string> input_files;
 
-  Mat prev, current, diff;
-  double current_mean = 0, current_pwr = 0;
+  Mat prev, current, diff, avg, bsimage;
+  double mv = 0, pw = 0;
 
   size_t i, j;
 
   enum algo algo = algo_div;
+
+  int flat_field_blur_size = 100;
+  int local_field_blur_size = 3;
 
   double gmin_sub = -0.08, gmax_sub = 0.08;
   double gmin_div = -0.1, gmax_div = 0.1;
@@ -361,6 +708,8 @@ int main(int argc, char *argv[])
   double alpha = 0.1;
 
   bool dump_histogram = false;
+
+  std::vector<KeyPoint> gblobs;
 
 
 
@@ -503,40 +852,49 @@ int main(int argc, char *argv[])
 
   sort(input_files.begin(), input_files.end(), less<string>());
 
+  if ( !detect_dust(input_files, gblobs, output_directory_name) ) {
+    fprintf(stderr, "detect_dust(%s) fails\n", input_directory_name);
+    return 1;
+  }
+
+  fprintf(stderr, "GLOBAL BLOBS: %zu detections\n", gblobs.size());
+  //return 0;
+
 
   for ( j = 0, i = 0; i < input_files.size(); ++i ) {
 
-    double mv = 0, pw = 0;
-    bool process_blobs = true;
+    Mat var;
+
     std::vector<KeyPoint> blobs;
 
-    if ( !load_image(current, input_files[i]) ) {
+    if ( !load_image(current, input_files[i], flat_field_blur_size, local_field_blur_size ) ) {
       continue;
     }
 
-    get_energy_metrics(current, &current_mean, &current_pwr);
-    //printf("%s: mean=%g pwr=%g\n", input_files[i].c_str(), current_mean, current_pwr);
-
-    current -= current_mean;
-    current /= current_pwr;
+    get_energy_metrics(current, &mv, &pw);
+    current -= mv;
+    current /= pw;
 
     if ( !prev.data ) {
-      // this is fisrt image in sequence
       prev = current;
       continue;
     }
 
-    // next image in sequence
+//    diff = current - prev;
+//    variance_filter(diff, var);
+//    var.convertTo(bsimage, CV_8UC1);
+//    detect_blobs(bsimage, blobs);
+//    draw_blobs(bsimage, blobs, output_directory_name, j);
+//    save_normalized_image(bsimage, output_directory_name, "var", j );
 
-    get_energy_metrics(current, &mv, &pw);
-    printf("%s: current_mean=%g -> mv=%g\n", input_files[i].c_str(), current_mean, mv);
+
 
     if ( algo == algo_sub ) {
       diff = current * (1 + alpha) - prev;
     }
     else {
       // fixme: div not implemented yet
-      diff = current * (1 + alpha) - prev;
+      diff = current * (1 + alpha)/prev;
     }
 
     prev = current;
@@ -559,35 +917,30 @@ int main(int argc, char *argv[])
       normalize_pixels(diff, 0, 1, 0, 255);
     }
 
-    if ( process_blobs ) {
+    if ( false ) {
+      for ( std::vector<KeyPoint>::const_iterator ii =  gblobs.begin(); ii != gblobs.end(); ++ii ) {
 
-      Mat tmp = diff.clone();
-      normalize_pixels(tmp, 0, 255, 0, 1);
+        Rect rc(
+            std::max((int) (ii->pt.x - ii->size ), 0),
+            std::max((int) (ii->pt.y - ii->size ), 0),
+            std::min((int)(2*ii->size), (int)(diff.cols-ii->pt.x-1)),
+            std::min((int)(2*ii->size), (int)(diff.rows-ii->pt.y-1))
+        );
 
-      tmp -= mean(tmp);
-      pow(tmp, 2, tmp);
-      blur(tmp, tmp, Size(5, 5));
-      normalize_pixels(tmp, 0, 1, 0, 255);
-      tmp.convertTo(tmp, CV_8UC1);
-
-      detect_blobs(tmp, blobs);
-
-      if ( blobs.size() < 1 ) {
-        fprintf(stderr, "No blobs detected\n");
+        Scalar m = mean(diff(rc));
+        //randn(diff(rc), m, Scalar::all(100));
+        randu(diff(rc), m - Scalar::all(70), m + Scalar::all(70));
+        GaussianBlur(diff(rc), diff(rc), Size(0,0), 0.66, 0.66);
       }
     }
 
 
     diff.convertTo(diff, CV_8UC1);
 
-    if ( process_blobs && blobs.size() ) {
-      //drawKeypoints(diff, blobs, diff, Scalar(0,0,255), DrawMatchesFlags::DRAW_RICH_KEYPOINTS );
-      for ( size_t i = 0; i < blobs.size(); ++i ) {
-        circle(diff, blobs[i].pt, 15, Scalar(0, 0, 255), 2, LINE_4, 0);
-      }
+    if ( true ) {
+      draw_blobs(diff, gblobs, NULL, -10 );
     }
 
-    diff = diff(Rect(32, 52, 960, 720));
 
     sprintf(outfilename, "%s/frame%03zu.tif", output_directory_name, j);
     if ( !imwrite(outfilename, diff) ) {
@@ -598,7 +951,6 @@ int main(int argc, char *argv[])
     ++j;
 
   }
-
 
 
   return 0;
@@ -648,6 +1000,53 @@ static void translate_image(const Mat & ref, Mat & image)
     warpPerspective(image, image, warp_matrix, image.size(), INTER_LINEAR + WARP_INVERSE_MAP);
   }
 
+}
+
+
+static void match_blob(blob & b, vector<bloblist>::iterator frame, vector<bloblist>::iterator endframe)
+{
+  if ( frame != endframe ) {
+    double x = b.x;
+    double y = b.y;
+
+    bloblist::iterator mb = find_blob(frame->begin(), frame->end(), x, y);
+    while ( mb != frame->end() ) {
+
+      match_blob(*mb, frame + 1, endframe);
+      b.x += mb->x;
+      b.y += mb->y;
+      b.sx += mb->x * mb->x;
+      b.sy += mb->y * mb->y;
+      b.n += mb->n;
+
+      frame->erase(mb);
+      mb = find_blob(frame->begin(), frame->end(), x, y);
+    }
+  }
+}
+
+
+static void match_blobs(vector<bloblist > & frames, bloblist & common)
+{
+  double x0, y0, sx, sy, dr;
+  for ( vector<bloblist >::iterator frame = frames.begin(); frame != frames.end(); ++frame ) {
+    for ( bloblist::iterator b = frame->begin(); b != frame->end(); ++b ) {
+      match_blob(*b, frame + 1, frames.end());
+
+      x0 = b->x / b->n;
+      y0 = b->y / b->n;
+
+      if ( b->n > 1 ) {
+        sx = sqrt(b->sx / b->n - x0 * x0);
+        sy = sqrt(b->sy / b->n - y0 * y0);
+      }
+      else {
+        sx = sy = 0;
+      }
+
+      common.emplace_back(blob(x0, y0, sx, sy, b->n));
+    }
+  }
 }
 
 

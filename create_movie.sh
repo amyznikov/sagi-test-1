@@ -1,6 +1,7 @@
 #! /bin/bash
 
 input_directory="${1}"
+filemask="${2}"
 
 if [[ "${input_directory}" == "" ]] ; then
 	echo "No input directory specified" 1>&2;
@@ -9,5 +10,13 @@ if [[ "${input_directory}" == "" ]] ; then
 	exit 1;
 fi	
 
-ffmpeg -y -framerate 10 -i "${input_directory}/frame%03d.tif" -c:v libx264 -pix_fmt yuv420p -crf 22  -f mp4 movie.mp4
-# -profile:v high
+
+echo "input_directory='${input_directory}'"
+echo "filemask='${filemask}'"
+
+if [[ "${filemask}" == "" ]] ; then
+	filemask='frame%03d.tif';
+fi
+
+ffmpeg -y -framerate 10 -i "${input_directory}/${filemask}" -c:v libx264 -pix_fmt yuv420p -profile:v high -crf 22  -f mp4 movie.mp4
+ 
