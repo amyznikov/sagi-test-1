@@ -1250,9 +1250,9 @@ int main(int argc, char *argv[])
       get_energy_metrics(current, &mv, &pw);
       diff -= mv;
     }
-    else { // if (algo == algo_div)
+    else { // if (algo == algo_avgdiv)
       divide(current * (1 + alpha), avg, diff, 1);
-      get_energy_metrics(current, &mv, &pw);
+      get_energy_metrics(diff, &mv, &pw);
       diff -= mv;
     }
 
