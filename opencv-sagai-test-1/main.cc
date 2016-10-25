@@ -23,7 +23,8 @@ using namespace std;
 
 enum algo {
   algo_sub,
-  algo_div
+  algo_div,
+  algo_avgdiv
 };
 
 
@@ -221,7 +222,7 @@ static void detect_blobs(Mat & image, std::vector<KeyPoint> & blobs)
   // Set thresholds
   params.minThreshold = 0;
   params.maxThreshold = 255;
-  params.thresholdStep = (params.maxThreshold - params.minThreshold);
+  params.thresholdStep = (params.maxThreshold - params.minThreshold)/4;
   params.minRepeatability = 1;
   params.minDistBetweenBlobs = 3;
 
@@ -233,7 +234,7 @@ static void detect_blobs(Mat & image, std::vector<KeyPoint> & blobs)
   params.blobColor = 255;
 
   params.filterByCircularity = true;
-  params.minCircularity = 0.7;
+  params.minCircularity = 0.3;
   params.maxCircularity = 1;
 
   params.filterByConvexity = false;
@@ -286,7 +287,7 @@ end:
 
 
 
-static bool load_image(Mat & image, const string & fname, int gbs, int lbs)
+static bool load_image(Mat & image, const string & fname, int gbs, double lbs)
 {
   Mat fld;
 
@@ -295,7 +296,7 @@ static bool load_image(Mat & image, const string & fname, int gbs, int lbs)
     return false;
   }
 
-  image = image(Rect(32, 52, 960, 720));
+  //image = image(Rect(32, 52, 960, 720));
   image.convertTo(image, CV_32FC1);
 
   if ( gbs > 0 ) {
@@ -304,7 +305,67 @@ static bool load_image(Mat & image, const string & fname, int gbs, int lbs)
   }
 
   if ( lbs > 0 ) {
-    blur(image, image, Size(lbs, lbs));
+    //blur(image, image, Size(lbs, lbs));
+    GaussianBlur(image, image, Size(0,0), lbs, lbs);
+  }
+
+  return true;
+}
+
+static bool save_image(const Mat & image, const char * fname)
+{
+  Mat gray;
+
+  normalize(image, gray, 0, 255, NORM_MINMAX);
+
+  //normalize_pixels(diff, gmin, gmax, 0, 255);
+  gray.convertTo(gray, CV_8UC1);
+
+  if ( !imwrite(fname, gray) ) {
+    fprintf(stderr, "fatal: imwrite(%s) fails\n", fname);
+    return false;
+  }
+
+  return true;
+}
+
+
+static bool create_averaged_frame(const vector<string> & input_files, Mat & avg, const char * output_directory_name,
+    int gbs, double lbs)
+{
+  Mat current;
+  double mv, pw;
+  size_t i, n;
+
+  for ( n = 0, i = 0; i < input_files.size(); ++i ) {
+    if ( !load_image(current, input_files[i], gbs, lbs) ) {
+      continue;
+    }
+
+    get_energy_metrics(current, &mv, &pw);
+
+    //current -= mv;
+    // current /= pw;
+
+    if ( !avg.data ) {
+      avg = current;
+    }
+    else {
+      avg += current;
+    }
+
+    ++n;
+  }
+
+  if ( n > 0 ) {
+    char filename[PATH_MAX];
+
+    avg /= n;
+
+    sprintf(filename, "%s/avg.tiff", output_directory_name);
+    if ( !save_image(avg, filename) ) {
+      return false;
+    }
   }
 
   return true;
@@ -375,14 +436,15 @@ void dump_hist(const char * fname, const Mat & image, double gmin, double gmax)
 }
 
 
-static void draw_blobs(Mat & img, const std::vector<KeyPoint> & blobs, const char * output_directory_name, int frame_index, bool draw=true)
+static void draw_blobs(Mat & img, const std::vector<KeyPoint> & blobs, const char * output_directory_name,
+    int frame_index, bool draw = true, double rscale = 2)
 {
   if ( draw ) {
     Scalar color1 = Scalar(0, 0, 0);
     Scalar color2 = Scalar(255, 255, 255);
     for ( size_t i = 0; i < blobs.size(); ++i ) {
-      circle(img, blobs[i].pt, blobs[i].size, color1, 1, LINE_4, 0);
-      circle(img, blobs[i].pt, blobs[i].size, color2, 1, LINE_4, 0);
+      circle(img, blobs[i].pt, blobs[i].size * rscale, color1, 1, LINE_4, 0);
+      circle(img, blobs[i].pt, blobs[i].size * rscale + 1, color2, 1, LINE_4, 0);
     }
   }
 
@@ -396,7 +458,7 @@ static void draw_blobs(Mat & img, const std::vector<KeyPoint> & blobs, const cha
 }
 
 
-static void variance_filter(Mat & src, Mat & dst)
+static void variance_filter(Mat & src, Mat & dst, double rmin, double rmax)
 {
   double r1 = 6;
   double r2 = 25;
@@ -458,10 +520,137 @@ static void variance_filter(Mat & src, Mat & dst)
   minMaxLoc(dst, &minVal, &maxVal);
   printf("VAR: minVal=%g maxVal=%g\n", minVal, maxVal);
 
-  normalize_pixels(dst, 1.5, 3, 0, 255);
+  normalize_pixels(dst, rmin, rmax, 0, 255);
 }
 
 
+
+static void variance_filter2(Mat & diff, Mat & var, double rmin, double rmax, double r1, double r2, double bgr)
+{
+//  double r1 = 3;
+//  double r2 = 15;
+  //double m1, v1, m2, v2;
+  double minVal, maxVal;
+  Mat bgnd, sigma1, sigma2, I1, M1, I2, M2;
+
+  Mat ring1, ring2;
+
+  if ( bgr <= 0 ) {
+    bgr = r2 / 2;
+  }
+
+  GaussianBlur(diff, bgnd, Size(0, 0), r2/2, r2/2);
+  diff -= bgnd;
+
+  if ( !ring1.data ) {
+    int npix = 0;
+    ring1 = Mat::zeros(r1 * 2 + 1, r1 * 2 + 1, CV_32FC1);
+    for ( int y = 0; y < r1 * 2 + 1; ++y ) {
+      float * row = reinterpret_cast<float*>(ring1.ptr(y));
+      for ( int x = 0; x < r1 * 2 + 1; ++x ) {
+        row[x] = hypot(x - r1, y - r1) <= r1;
+        ++npix;
+      }
+    }
+    ring1 /= npix;
+  }
+
+  if ( !ring2.data ) {
+    int npix = 0;
+    ring2 = Mat::zeros(r2 * 2 + 1, r2 * 2 + 1, CV_32FC1);
+    for ( int y = 0; y < r2 * 2 + 1; ++y ) {
+      float * row = reinterpret_cast<float*>(ring2.ptr(y));
+      for ( int x = 0; x < r2 * 2 + 1; ++x ) {
+        row[x] = hypot(x - r2, y - r2) <= r2;
+        ++npix;
+      }
+    }
+    ring2 /= npix;
+  }
+
+  //blur(src, src, Size(3, 3));
+  //GaussianBlur(src, src, Size(0, 0), 2, 2);
+
+
+  //GaussianBlur(src, M1, Size(0, 0), r1, r1);
+  filter2D(diff, M1, -1, ring1);
+  //GaussianBlur(src.mul(src), I1, Size(0, 0), r1, r1);
+  filter2D(diff.mul(diff), I1, -1, ring1);
+  sigma1 = I1 - M1.mul(M1);
+  //cv::sqrt(I1 - M1.mul(M1), sigma1);
+  minMaxLoc(sigma1, &minVal, &maxVal);
+  printf("SIGMA1: minVal=%g maxVal=%g\n", minVal, maxVal);
+
+  //GaussianBlur(src, M2, Size(0, 0), r2, r2);
+  filter2D(diff, M2, -1, ring2);
+  //GaussianBlur(src.mul(src), I2, Size(0, 0), r2, r2);
+  filter2D(diff.mul(diff), I2, -1, ring2);
+  //cv::sqrt(I2 - M2.mul(M2), sigma2);
+  sigma2 = I2 - M2.mul(M2);
+  minMaxLoc(sigma2, &minVal, &maxVal);
+  printf("SIGMA2: minVal=%g maxVal=%g\n", minVal, maxVal);
+
+  divide(sigma1, sigma2, var);
+  //var = sigma1;
+
+  minMaxLoc(var, &minVal, &maxVal);
+  printf("VAR: minVal=%g maxVal=%g\n", minVal, maxVal);
+
+  normalize_pixels(var, rmin, rmax, 0, 255);
+  //normalize(var, var, 0, 255, NORM_MINMAX);
+}
+
+static void variance_filter3(Mat & diff, Mat & var, double rmin, double rmax, double r1, double bgr)
+{
+  //  double r1 = 3;
+  //  double r2 = 15;
+  double m, v;//, m2, v2;
+  double minVal, maxVal;
+  Mat bgnd, sigma1, I1, M1, I2, M2;
+
+  Mat ring1, ring2;
+
+  if ( bgr > 0 ) {
+    //GaussianBlur(diff, diff, Size(0, 0), r1);
+    //GaussianBlur(diff, bgnd, Size(0, 0), bgr);
+    //divide(diff, bgnd, diff);
+//
+//    get_energy_metrics(diff, &m, &v);
+//
+    //diff -= bgnd;
+//    diff /= v;
+  }
+
+  if ( !ring1.data ) {
+    int npix = 0;
+    ring1 = Mat::zeros(r1 * 2 + 1, r1 * 2 + 1, CV_32FC1);
+    for ( int y = 0; y < r1 * 2 + 1; ++y ) {
+      float * row = reinterpret_cast<float*>(ring1.ptr(y));
+      for ( int x = 0; x < r1 * 2 + 1; ++x ) {
+        row[x] = hypot(x - r1, y - r1) <= r1;
+        ++npix;
+      }
+    }
+    ring1 /= npix;
+  }
+
+  //GaussianBlur(src, M1, Size(0, 0), r1, r1);
+  filter2D(diff, M1, -1, ring1);
+  //GaussianBlur(src.mul(src), I1, Size(0, 0), r1, r1);
+  filter2D(diff.mul(diff), I1, -1, ring1);
+  //sigma1 = I1 - M1.mul(M1);
+  cv::sqrt(I1 - M1.mul(M1), sigma1);
+  minMaxLoc(sigma1, &minVal, &maxVal);
+  printf("SIGMA3: minVal=%g maxVal=%g\n", minVal, maxVal);
+
+  var = sigma1;
+
+  minMaxLoc(var, &minVal, &maxVal);
+  printf("VAR3: minVal=%g maxVal=%g\n", minVal, maxVal);
+
+  normalize_pixels(var, rmin, rmax, 0, 255);
+    //normalize(var, var, 0, 255, NORM_MINMAX);
+}
 
 struct blob {
   double x, y, sx, sy, xmin, xmax, ymin, ymax, size;
@@ -490,6 +679,17 @@ static bloblist::iterator find_blob(bloblist::iterator beg, bloblist::iterator e
   return beg;
 }
 
+static vector<KeyPoint>::const_iterator find_keypoint(vector<KeyPoint>::const_iterator beg,
+    vector<KeyPoint>::const_iterator end, double x, double y, double r)
+{
+  for ( ; beg != end; ++beg ) {
+    if ( hypot(beg->pt.x - x, beg->pt.y - y) < r ) {
+      break;
+    }
+  }
+  return beg;
+}
+
 
 static void match_blobs(bloblist & blobs)
 {
@@ -497,7 +697,7 @@ static void match_blobs(bloblist & blobs)
 
   do {
     njoins = 0;
-    for ( bloblist::iterator b = blobs.begin(); b != blobs.end(); ++b ) {
+    for ( bloblist::iterator b = blobs.begin(); b != blobs.end();  ) {
 
       double x = b->x, y = b->y;
       double x2 = x * x, y2 = y * y;
@@ -536,7 +736,10 @@ static void match_blobs(bloblist & blobs)
         match = blobs.erase(match);
       }
 
-      if ( n > 1 ) {
+      if ( n == 1 ) {
+        ++b;
+      }
+      else {
 
         b->x = x / n;
         b->y = y / n;
@@ -562,6 +765,17 @@ static void match_blobs(bloblist & blobs)
 
 }
 
+static void find_common_blobs(const vector<KeyPoint> & bl1, const vector<KeyPoint> & bl2, vector<KeyPoint> & bl3)
+{
+  for ( vector<KeyPoint>::const_iterator b1 = bl1.begin(); b1 != bl1.end(); ++b1 ) {
+    vector<KeyPoint>::const_iterator b2 = find_keypoint(bl2.begin(), bl2.end(), b1->pt.x, b1->pt.y, 10);
+    while ( b2 != bl2.end() ) {
+      bl3.emplace_back(*b2);
+      b2 = find_keypoint(b2 + 1, bl2.end(), b1->pt.x, b1->pt.y, 18);
+    }
+  }
+
+}
 
 static bool detect_dust(const vector<string> & input_files, vector<KeyPoint> & gblobs, const char * output_directory_name)
 {
@@ -593,7 +807,7 @@ static bool detect_dust(const vector<string> & input_files, vector<KeyPoint> & g
     diff = current - prev;
     prev = current;
 
-    variance_filter(diff, var);
+    variance_filter(diff, var, 1.5, 3);
     var.convertTo(var, CV_8UC1);
     detect_blobs(var, blobs);
     draw_blobs(var, blobs, output_directory_name, n, false);
@@ -640,24 +854,156 @@ static bool detect_dust(const vector<string> & input_files, vector<KeyPoint> & g
       }
       fclose(fp);
     }
+  }
+
+
+  return n > 0;
+}
+
+
+static bool create_bloblist(const Mat & avg, const vector<string> & input_files, vector<KeyPoint> & gblobs, const char * output_directory_name)
+{
+  Mat current, diff, avgvar;
+  double mv, pw;
+  size_t i, n;
+
+  char fname[PATH_MAX];
+
+  for ( n = 0, i = 0; i < input_files.size(); ++i ) {
+
+    if ( !load_image(current, input_files[i], 0, 0) ) {
+      continue;
+    }
+
+    //get_energy_metrics(current, &mv, &pw);
+
+    divide(current, avg, diff, 1);
+    get_energy_metrics(current, &mv, &pw);
+    diff -= mv;
+
+    Mat var;
+    variance_filter2(diff, var, 0, 9, 3, 15,7);
+    if ( !avgvar.data ) {
+      avgvar = var;
+    }
+    else {
+      avgvar += var;
+    }
+
+    ++n;
+  }
+
+  if ( n ) {
+
+    avgvar /= n;
+    normalize_pixels(avgvar, 58, 255, 0, 255);
+
+    avgvar.convertTo(avgvar, CV_8UC1);
+
+    //GaussianBlur(avgvar, avgvar, Size(0,0), 1, 1);
+    detect_blobs(avgvar, gblobs);
+    draw_blobs(avgvar, gblobs, NULL, -1, true);
+
+    sprintf(fname, "%s/avgvar.new.tif", output_directory_name);
+    save_image(avgvar, fname);
+  }
+
+  return true;
+}
+
+static bool detect_dust2(const Mat & avg, const vector<string> & input_files, vector<KeyPoint> & gblobs, const char * output_directory_name)
+{
+  Mat current, diff;
+  double mv, pw;
+  size_t i, n;
+
+  char fname[PATH_MAX];
+
+
+  create_bloblist(avg, input_files, gblobs, output_directory_name);
+
+
+  for ( n = 0, i = 0; i < input_files.size(); ++i ) {
+
+    vector<KeyPoint> blobs;
+    vector<KeyPoint> common_blobs;
+    Mat var;//, var2;
+
+
+    if ( !load_image(current, input_files[i], 0, 0) ) {
+      continue;
+    }
+
+    divide(current, avg, diff, 1);
+    get_energy_metrics(current, &mv, &pw);
+    diff -= mv;
+
+    variance_filter2(diff, var, 0.3, 4, 1, 20, 25);
+    //var2 = var.clone();
+    normalize_pixels(var, 58, 255, 0, 255);
+    var.convertTo(var, CV_8UC1);
+    detect_blobs(var, blobs);
+
+    find_common_blobs(blobs, gblobs, common_blobs);
+
+    draw_blobs(var, gblobs, NULL, n, true, 2);
+    draw_blobs(var, common_blobs, output_directory_name, n, true, 2.5);
 
 
 
+
+//    for ( vector<KeyPoint>::const_iterator ii = blobs.begin(); ii != blobs.end(); ++ii ) {
+//      tmp.emplace_back(blob(ii->pt.x, ii->pt.y, ii->size));
+//    }
 //
+//    match_blobs(tmp);
+////    for ( bloblist::iterator b = tmp.begin(); b != tmp.end(); ++b ) {
+////      b->n = 1;
+////    }
+//    common.insert(common.end(), tmp.begin(), tmp.end());
+
+    ++n;
+  }
+
+  if ( n ) {
+//    match_blobs(common);
+//
+//    for ( bloblist::iterator b = common.begin(); b != common.end(); ++b ) {
+//      b->sx = b->xmax - b->xmin;
+//      b->sy = b->ymax - b->ymin;
+//      if ( b->n > 6 && hypot(b->sx, b->sy) <= 10 )
+//      {
+//        gblobs.emplace_back(b->x, b->y, b->size, -1, 0, b->n); // hypot(b->sx, b->sy)
+//      }
+//    }
+
 //    if ( 1 ) {
 //
-//      char fname[PATH_MAX];
 //
 //      sprintf(fname, "%s/blobs.txt", output_directory_name);
 //
 //      FILE * fp = fopen(fname, "w");
 //
-//      fprintf(fp, "X\tY\tS\tOCT\n");
-//      for ( vector<KeyPoint>::iterator b = gblobs.begin(); b != gblobs.end(); ++b ) {
-//        fprintf(fp, "%8g\t%8g\t%8g\t%4d\n", b->pt.x, b->pt.y, b->size, b->octave);
+//      fprintf(fp, "X\tY\tSX\tSY\tS\tN\n");
+//      for ( bloblist::const_iterator b = common.begin(); b != common.end(); ++b ) {
+//        if ( b->n != 1 ) {
+//          fprintf(fp, "%8g\t%8g\t%8g\t%8g\t%8g\t%4d\n", b->x, b->y, b->sx, b->sy, hypot(b->sx, b->sy), b->n);
+//        }
 //      }
 //      fclose(fp);
 //    }
+
+//    avgvar /= n;
+//    normalize_pixels(avgvar, 60, 255, 0, 255);
+//
+//    avgvar.convertTo(avgvar, CV_8UC1);
+//
+////    vector<KeyPoint> blobs;
+////    detect_blobs(avgvar, blobs);
+////    draw_blobs(avgvar, blobs, NULL, -1, true);
+//
+//    sprintf(fname, "%s/avgvar.tif", output_directory_name);
+//    save_image(avgvar, fname);
 
   }
 
@@ -666,19 +1012,6 @@ static bool detect_dust(const vector<string> & input_files, vector<KeyPoint> & g
 }
 
 
-static void save_normalized_image(const Mat & image, const char * output_directory_name, const char * prefix, int frame_index )
-{
-  Mat gray;
-  char outfilename[PATH_MAX];
-
-  //normalize_pixels(diff, gmin, gmax, 0, 255);
-  image.convertTo(gray, CV_8UC1);
-
-  sprintf(outfilename, "%s/%s.%03d.tif", output_directory_name, prefix, frame_index);
-  if ( !imwrite(outfilename, gray) ) {
-    fprintf(stderr, "fatal: imwrite(%s) fails\n", outfilename);
-  }
-}
 
 
 int main(int argc, char *argv[])
@@ -689,15 +1022,15 @@ int main(int argc, char *argv[])
 
   vector<string> input_files;
 
-  Mat prev, current, diff, avg, bsimage;
+  Mat prev, current, diff, avg, bsimage, avgdiff;
   double mv = 0, pw = 0;
 
   size_t i, j;
 
-  enum algo algo = algo_div;
+  enum algo algo = algo_avgdiv;
 
-  int flat_field_blur_size = 100;
-  int local_field_blur_size = 3;
+  int gbs = 50;
+  double lbs = 0;
 
   double gmin_sub = -0.08, gmax_sub = 0.08;
   double gmin_div = -0.1, gmax_div = 0.1;
@@ -725,10 +1058,10 @@ int main(int argc, char *argv[])
       printf("  gmax=<high-output-threshod> [sub=%g div=%g] \n", gmax_sub, gmax_div);
       printf("  gamma=<gamma-correction-of-output-frames> [%g] \n", gamma);
       printf("  alpha=<contrast-parameter> [%g]\n", alpha);
-      printf("  b=<flat-field-blur-size> [%d] \n", flat_field_blur_size);
-      printf("  f=<local-field-blur-size> [%d] \n", local_field_blur_size);
+      printf("  b=<flat-field-blur-size> [%d] \n", gbs);
+      printf("  f=<local-field-blur-size> [%g] \n", lbs);
       printf("  cr=<central_region_radius> [%d] \n", central_region_radius);
-      printf("  a=<sub|div> select 'frame difference' algorithm\n");
+      printf("  a=<sub|div|avgdiv> select 'frame difference' algorithm\n");
 
       return 0;
     }
@@ -752,6 +1085,9 @@ int main(int argc, char *argv[])
       }
       else if ( strcmp(argv[i] + 2, "div") == 0 ) {
         algo = algo_div;
+      }
+      else if (strcmp(argv[i] + 2, "avgdiv") == 0 ) {
+        algo = algo_avgdiv;
       }
       else {
         fprintf(stderr, "Invalid algorithm %s selected. Use one of a=sub or a=div\n", argv[i]);
@@ -785,13 +1121,13 @@ int main(int argc, char *argv[])
       }
     }
     else if ( strncmp(argv[i], "b=", 2) == 0 ) {
-      if ( sscanf(argv[i] + 2, "%d", &flat_field_blur_size) != 1 ) {
+      if ( sscanf(argv[i] + 2, "%d", &gbs) != 1 ) {
         fprintf(stderr, "Syntax error on %s\n", argv[i]);
         return 1;
       }
     }
     else if ( strncmp(argv[i], "f=", 2) == 0 ) {
-      if ( sscanf(argv[i] + 2, "%d", &local_field_blur_size) != 1 ) {
+      if ( sscanf(argv[i] + 2, "%lf", &lbs) != 1 ) {
         fprintf(stderr, "Syntax error on %s\n", argv[i]);
         return 1;
       }
@@ -818,6 +1154,7 @@ int main(int argc, char *argv[])
       gmin = gmin_sub;
       break;
     case algo_div :
+    case algo_avgdiv :
       gmin = gmin_div;
       break;
     }
@@ -829,6 +1166,7 @@ int main(int argc, char *argv[])
       gmax = gmax_sub;
       break;
     case algo_div :
+    case algo_avgdiv :
       gmax = gmax_div;
       break;
     }
@@ -852,14 +1190,31 @@ int main(int argc, char *argv[])
 
   sort(input_files.begin(), input_files.end(), less<string>());
 
-  if ( !detect_dust(input_files, gblobs, output_directory_name) ) {
-    fprintf(stderr, "detect_dust(%s) fails\n", input_directory_name);
-    return 1;
+  if ( algo == algo_avgdiv ) {
+
+    if ( !create_averaged_frame(input_files, avg, output_directory_name, gbs, lbs) ) {
+      fprintf(stderr, "create_averaged_frame() fails\n");
+      return 1;
+    }
+
+    if ( !detect_dust2(avg, input_files, gblobs, output_directory_name) ) {
+      fprintf(stderr, "detect_dust(%s) fails\n", input_directory_name);
+      return 1;
+    }
+
+    //    get_energy_metrics(avg, &mv, &pw);
+    ////    avg -= mv;
+    ////    avg /= pw;
+  }
+  else {
+
+    if ( !detect_dust(input_files, gblobs, output_directory_name) ) {
+      fprintf(stderr, "detect_dust(%s) fails\n", input_directory_name);
+      return 1;
+    }
   }
 
   fprintf(stderr, "GLOBAL BLOBS: %zu detections\n", gblobs.size());
-  //return 0;
-
 
   for ( j = 0, i = 0; i < input_files.size(); ++i ) {
 
@@ -867,40 +1222,53 @@ int main(int argc, char *argv[])
 
     std::vector<KeyPoint> blobs;
 
-    if ( !load_image(current, input_files[i], flat_field_blur_size, local_field_blur_size ) ) {
+    if ( !load_image(current, input_files[i], gbs, lbs ) ) {
       continue;
     }
 
     get_energy_metrics(current, &mv, &pw);
-    current -= mv;
-    current /= pw;
 
-    if ( !prev.data ) {
-      prev = current;
-      continue;
+    if ( algo == algo_sub ) {
+      current -= mv;
+      current /= pw;
     }
 
-//    diff = current - prev;
-//    variance_filter(diff, var);
-//    var.convertTo(bsimage, CV_8UC1);
-//    detect_blobs(bsimage, blobs);
-//    draw_blobs(bsimage, blobs, output_directory_name, j);
-//    save_normalized_image(bsimage, output_directory_name, "var", j );
+    if ( algo != algo_avgdiv ) {
+      if ( !prev.data ) {
+        prev = current.clone();
+        continue;
+      }
+    }
 
 
 
     if ( algo == algo_sub ) {
       diff = current * (1 + alpha) - prev;
     }
-    else {
-      // fixme: div not implemented yet
-      diff = current * (1 + alpha)/prev;
+    else if (algo == algo_div) {
+      divide(prev, current * (1 + alpha), diff, 1);
+      get_energy_metrics(current, &mv, &pw);
+      diff -= mv;
+    }
+    else { // if (algo == algo_div)
+      divide(current * (1 + alpha), avg, diff, 1);
+      get_energy_metrics(current, &mv, &pw);
+      diff -= mv;
     }
 
-    prev = current;
+    if ( algo != algo_avgdiv ) {
+      prev = current;//.clone();
+    }
 
 
     threshold_pixels(diff, gmin, gmax);
+
+    if ( !avgdiff.data ) {
+      avgdiff = diff.mul(diff);
+    }
+    else {
+      avgdiff += diff.mul(diff);
+    }
 
     if ( dump_histogram ) {
       sprintf(outfilename, "%s/frame%03zu.hist", output_directory_name, j);
@@ -917,7 +1285,9 @@ int main(int argc, char *argv[])
       normalize_pixels(diff, 0, 1, 0, 255);
     }
 
-    if ( true ) {
+
+
+    if ( false ) {
       for ( std::vector<KeyPoint>::const_iterator ii =  gblobs.begin(); ii != gblobs.end(); ++ii ) {
 
         Rect rc(
@@ -937,7 +1307,7 @@ int main(int argc, char *argv[])
 
     diff.convertTo(diff, CV_8UC1);
 
-    if ( false ) {
+    if ( true ) {
       draw_blobs(diff, gblobs, NULL, -10 );
     }
 
@@ -950,6 +1320,20 @@ int main(int argc, char *argv[])
 
     ++j;
 
+  }
+
+
+  if ( j > 0 ) {
+
+    avgdiff /= j;
+    normalize_pixels(avgdiff, 0, max(gmin * gmin, gmax * gmax), 0, 255);
+    avgdiff.convertTo(avgdiff, CV_8UC1);
+
+    sprintf(outfilename, "%s/avgdiff.tif", output_directory_name);
+    if ( !imwrite(outfilename, avgdiff) ) {
+      fprintf(stderr, "fatal: imwrite(%s) fails\n", outfilename);
+      return 1;
+    }
   }
 
 
