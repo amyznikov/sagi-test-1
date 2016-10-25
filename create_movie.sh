@@ -18,5 +18,7 @@ if [[ "${filemask}" == "" ]] ; then
 	filemask='frame%03d.tif';
 fi
 
-ffmpeg -y -framerate 10 -i "${input_directory}/${filemask}" -c:v libx264 -pix_fmt yuv420p -profile:v high -crf 22  -f mp4 movie.mp4
+#ffmpeg -y -framerate 10 -i "${input_directory}/${filemask}" -c:v libx264 -pix_fmt yuv420p -profile:v high -crf 22  -f mp4 movie.mp4
+
+ /usr/bin/ffmpeg -y -framerate 10 -i "${input_directory}/${filemask}" -c:v mjpeg -q:v 0  -f avi movie.avi
  
